@@ -355,43 +355,13 @@ def build_model(input_shape, num_classes):
 
     return keras.models.Model(inputs=inputs, outputs=outputs)
 
-
-model = build_model((SAMPLING_RATE // 2, 1), len(class_names))
-
+model = keras.models.load_model('speaker-Recognition/saved_model/my_model')
 model.summary()
 
-# Compile the model using Adam's default learning rate
-model.compile(
-    optimizer="Adam", loss="sparse_categorical_crossentropy", metrics=["accuracy"]
-)
 
-# Add callbacks:
-# 'EarlyStopping' to stop training when the model is not enhancing anymore
-# 'ModelCheckPoint' to always keep the model that has the best val_accuracy
-model_save_filename = "speaker-Recognition/model.h5"
-
-earlystopping_cb = keras.callbacks.EarlyStopping(patience=10, restore_best_weights=True)
-mdlcheckpoint_cb = keras.callbacks.ModelCheckpoint(
-    model_save_filename, monitor="val_accuracy", save_best_only=True
-)
-
-"""
-## Training
-"""
-
-history = model.fit(
-    train_ds,
-    epochs=EPOCHS,
-    validation_data=valid_ds,
-    callbacks=[earlystopping_cb, mdlcheckpoint_cb],
-)
-
-"""
-## Evaluation
-"""
 
 print(model.evaluate(valid_ds))
-model.save('speaker-Recognition/saved_model/my_model')
+
 """
 We get ~ 98% validation accuracy.
 """
