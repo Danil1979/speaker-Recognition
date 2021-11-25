@@ -1,58 +1,27 @@
-"""
-Title: Speaker Recognition
-Author: [Fadi Badine](https://twitter.com/fadibadine)
-Date created: 14/06/2020
-Last modified: 03/07/2020
-Description: Classify speakers using Fast Fourier Transform (FFT) and a 1D Convnet.
-"""
-"""
-## Introduction
-This example demonstrates how to create a model to classify speakers from the
-frequency domain representation of speech recordings, obtained via Fast Fourier
-Transform (FFT).
-It shows the following:
-- How to use `tf.data` to load, preprocess and feed audio streams into a model
-- How to create a 1D convolutional network with residual
-connections for audio classification.
-Our process:
-- We prepare a dataset of speech samples from different speakers, with the speaker as label.
-- We add background noise to these samples to augment our data.
-- We take the FFT of these samples.
-- We train a 1D convnet to predict the correct speaker given a noisy FFT speech sample.
-Note:
-- This example should be run with TensorFlow 2.3 or higher, or `tf-nightly`.
-- The noise samples in the dataset need to be resampled to a sampling rate of 16000 Hz
-before using the code in this example. In order to do this, you will need to have
-installed `ffmpg`.
-"""
 
 """
 ## Setup
 """
 
 import os
-import shutil
+import pandas as pd
 import numpy as np
-import librosa
 import tensorflow as tf
 from tensorflow import keras
-import tensorflow_io as tfio
 from pathlib import Path
-from IPython.display import display, Audio
+import colorama 
 
+colorama.init(strip=False)
 
-
-# Get the data from https://www.kaggle.com/kongaevans/speaker-recognition-dataset/download
-# and save it to the 'Downloads' folder in your HOME directory
 DATASET_ROOT = os.path.join(os.path.expanduser("~"), "Downloads/16000_pcm_speeches")
-
-# The folders in which we will put the audio samples and the noise samples
+DATASET_ROOT_DOWNLOAD = os.path.join(os.path.expanduser("~"), "Downloads")
+# The folders in which we will put the training data and testing data
 AUDIO_SUBFOLDER = "audio"
-NOISE_SUBFOLDER = "noise"
+
 
 DATASET_AUDIO_PATH = os.path.join(DATASET_ROOT, AUDIO_SUBFOLDER)
-DATASET_NOISE_PATH = os.path.join(DATASET_ROOT, NOISE_SUBFOLDER)
 
+DATASET_TEST_PATH = os.path.join(DATASET_ROOT_DOWNLOAD, "train")
 # Percentage of samples to use for validation
 VALID_SPLIT = 0.1
 
@@ -71,140 +40,20 @@ SAMPLING_RATE = 16000
 #      where prop = sample_amplitude / noise_amplitude
 SCALE = 0.5
 
-BATCH_SIZE = 128
+BATCH_SIZE = 25
 EPOCHS = 100
-
 
 """
 ## Data preparation
-The dataset is composed of 7 folders, divided into 2 groups:
-- Speech samples, with 5 folders for 5 different speakers. Each folder contains
-1500 audio files, each 1 second long and sampled at 16000 Hz.
-- Background noise samples, with 2 folders and a total of 6 files. These files
-are longer than 1 second (and originally not sampled at 16000 Hz, but we will resample them to 16000 Hz).
-We will use those 6 files to create 354 1-second-long noise samples to be used for training.
-Let's sort these 2 categories into 2 folders:
-- An `audio` folder which will contain all the per-speaker speech sample folders
-- A `noise` folder which will contain all the noise samples
+The dataset is composed of 5 folders
+- Speech samples, with 7 folders for 7 different speakers. Each folder contains
+1400 audio files, each 1 second long and sampled at 16000 Hz.
 """
 
-"""
-Before sorting the audio and noise categories into 2 folders,
-we have the following directory structure:
-```
-main_directory/
-...speaker_a/
-...speaker_b/
-...speaker_c/
-...speaker_d/
-...speaker_e/
-...other/
-..._background_noise_/
-```
-After sorting, we end up with the following structure:
-```
-main_directory/
-...audio/
-......speaker_a/
-......speaker_b/
-......speaker_c/
-......speaker_d/
-......speaker_e/
-...noise/
-......other/
-......_background_noise_/
-```
-"""
-
-# If folder `audio`, does not exist, create it, otherwise do nothing
-if os.path.exists(DATASET_AUDIO_PATH) is False:
-    os.makedirs(DATASET_AUDIO_PATH)
-
-# If folder `noise`, does not exist, create it, otherwise do nothing
-if os.path.exists(DATASET_NOISE_PATH) is False:
-    os.makedirs(DATASET_NOISE_PATH)
-
-for folder in os.listdir(DATASET_ROOT):
-    if os.path.isdir(os.path.join(DATASET_ROOT, folder)):
-        if folder in [AUDIO_SUBFOLDER, NOISE_SUBFOLDER]:
-            # If folder is `audio` or `noise`, do nothing
-            continue
-        elif folder in ["other", "_background_noise_"]:
-            # If folder is one of the folders that contains noise samples,
-            # move it to the `noise` folder
-            shutil.move(
-                os.path.join(DATASET_ROOT, folder),
-                os.path.join(DATASET_NOISE_PATH, folder),
-            )
-        else:
-            # Otherwise, it should be a speaker folder, then move it to
-            # `audio` folder
-            shutil.move(
-                os.path.join(DATASET_ROOT, folder),
-                os.path.join(DATASET_AUDIO_PATH, folder),
-            )
-
-"""
-## Noise preparation
-In this section:
-- We load all noise samples (which should have been resampled to 16000)
-- We split those noise samples to chuncks of 16000 samples which
-correspond to 1 second duration each
-"""
-
-# Get the list of all noise files
-noise_paths = []
-for subdir in os.listdir(DATASET_NOISE_PATH):
-    subdir_path = Path(DATASET_NOISE_PATH) / subdir
-    if os.path.isdir(subdir_path):
-        noise_paths += [
-            os.path.join(subdir_path, filepath)
-            for filepath in os.listdir(subdir_path)
-            if filepath.endswith(".wav")
-        ]
-
-print(
-    "Found {} files belonging to {} directories".format(
-        len(noise_paths), len(os.listdir(DATASET_NOISE_PATH))
-    )
-)
-
-"""
-Resample all noise samples to 16000 Hz
-"""
-
-# Split noise into chunks of 16,000 steps each
-def load_noise_sample(path):
-    sample, sampling_rate = tf.audio.decode_wav(
-        tf.io.read_file(path), desired_channels=1
-    )
-    if sampling_rate == SAMPLING_RATE:
-        # Number of slices of 16000 each that can be generated from the noise sample
-        slices = int(sample.shape[0] / SAMPLING_RATE)
-        sample = tf.split(sample[: slices * SAMPLING_RATE], slices)
-        return sample
-    else:
-        print("Sampling rate for {} is incorrect. Ignoring it".format(path))
-        return None
-
-
-noises = []
-for path in noise_paths:
-    sample = load_noise_sample(path)
-    if sample:
-        noises.extend(sample)
-noises = tf.stack(noises)
-
-print(
-    "{} noise files were split into {} noise samples where each is {} sec. long".format(
-        len(noise_paths), noises.shape[0], noises.shape[1] // SAMPLING_RATE
-    )
-)
 
 """
 ## Dataset generation
 """
-
 
 def paths_and_labels_to_dataset(audio_paths, labels):
     """Constructs a dataset of audios and labels."""
@@ -256,10 +105,7 @@ def audio_to_fft(audio):
 
 
 # Get the list of audio file paths along with their corresponding labels
-
 class_names = os.listdir(DATASET_AUDIO_PATH)
-print("Our class names: {}".format(class_names,))
-
 audio_paths = []
 labels = []
 for label, name in enumerate(class_names):
@@ -277,6 +123,7 @@ print(
     "Found {} files belonging to {} classes.".format(len(audio_paths), len(class_names))
 )
 
+
 # Shuffle
 rng = np.random.RandomState(SHUFFLE_SEED)
 rng.shuffle(audio_paths)
@@ -286,80 +133,33 @@ rng.shuffle(labels)
 # Split into training and validation
 num_val_samples = int(VALID_SPLIT * len(audio_paths))
 print("Using {} files for training.".format(len(audio_paths) - num_val_samples))
-train_audio_paths = audio_paths[:-num_val_samples]
-train_labels = labels[:-num_val_samples]
-
-print("Using {} files for validation.".format(num_val_samples))
 valid_audio_paths = audio_paths[-num_val_samples:]
 valid_labels = labels[-num_val_samples:]
-
-# Create 2 datasets, one for training and the other for validation
-train_ds = paths_and_labels_to_dataset(train_audio_paths, train_labels)
-train_ds = train_ds.shuffle(buffer_size=BATCH_SIZE * 8, seed=SHUFFLE_SEED).batch(
-    BATCH_SIZE
-)
-
 valid_ds = paths_and_labels_to_dataset(valid_audio_paths, valid_labels)
 valid_ds = valid_ds.shuffle(buffer_size=32 * 8, seed=SHUFFLE_SEED).batch(32)
-
-
-# Add noise to the training set
-train_ds = train_ds.map(
-    lambda x, y: (add_noise(x, noises, scale=SCALE), y),
-    num_parallel_calls=tf.data.AUTOTUNE,
-)
-
-# Transform audio wave to the frequency domain using `audio_to_fft`
-train_ds = train_ds.map(
-    lambda x, y: (audio_to_fft(x), y), num_parallel_calls=tf.data.AUTOTUNE
-)
-train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
 
 valid_ds = valid_ds.map(
     lambda x, y: (audio_to_fft(x), y), num_parallel_calls=tf.data.AUTOTUNE
 )
-valid_ds = valid_ds.prefetch(tf.data.AUTOTUNE)
 
-"""
-## Model Definition
-"""
+print("Our class names: {}".format(class_names,))
+test_folder = os.listdir(DATASET_TEST_PATH)
+test_paths = []
+test_labels = []
+for label, name in enumerate(test_folder):
+    print("Processing speaker for testing {}".format(name,))
+    dir_path = Path(DATASET_TEST_PATH) / name
+    speaker_sample_paths = [
+        os.path.join(dir_path, filepath)
+        for filepath in os.listdir(dir_path)
+        if filepath.endswith(".wav")
+    ]
+    test_paths += speaker_sample_paths
+    test_labels += [label] * len(speaker_sample_paths)
+    print(test_labels)
 
-
-def residual_block(x, filters, conv_num=3, activation="relu"):
-    # Shortcut
-    s = keras.layers.Conv1D(filters, 1, padding="same")(x)
-    for i in range(conv_num - 1):
-        x = keras.layers.Conv1D(filters, 3, padding="same")(x)
-        x = keras.layers.Activation(activation)(x)
-    x = keras.layers.Conv1D(filters, 3, padding="same")(x)
-    x = keras.layers.Add()([x, s])
-    x = keras.layers.Activation(activation)(x)
-    return keras.layers.MaxPool1D(pool_size=2, strides=2)(x)
-
-
-def build_model(input_shape, num_classes):
-    inputs = keras.layers.Input(shape=input_shape, name="input")
-
-    x = residual_block(inputs, 16, 2)
-    x = residual_block(x, 32, 2)
-    x = residual_block(x, 64, 3)
-    x = residual_block(x, 128, 3)
-    x = residual_block(x, 128, 3)
-
-    x = keras.layers.AveragePooling1D(pool_size=3, strides=3)(x)
-    x = keras.layers.Flatten()(x)
-    x = keras.layers.Dense(256, activation="relu")(x)
-    x = keras.layers.Dense(128, activation="relu")(x)
-
-    outputs = keras.layers.Dense(num_classes, activation="softmax", name="output")(x)
-
-    return keras.models.Model(inputs=inputs, outputs=outputs)
-
-model = keras.models.load_model('speaker-Recognition/saved_model/my_model')
+model = keras.models.load_model('speaker-Recognition/saved_model/my_model(v4)')
 model.summary()
-
-
-
 print(model.evaluate(valid_ds))
 
 """
@@ -375,15 +175,21 @@ Let's take some samples and:
 the model is still pretty accurate
 """
 
-SAMPLES_TO_DISPLAY = 10
+SAMPLES_TO_DISPLAY = BATCH_SIZE
 
-test_ds = paths_and_labels_to_dataset(valid_audio_paths, valid_labels)
+# test_ds = paths_and_labels_to_dataset(valid_audio_paths, valid_labels)
+test_ds = paths_and_labels_to_dataset(test_paths, test_labels)
 test_ds = test_ds.shuffle(buffer_size=BATCH_SIZE * 8, seed=SHUFFLE_SEED).batch(
     BATCH_SIZE
 )
 
-test_ds = test_ds.map(lambda x, y: (add_noise(x, noises, scale=SCALE), y))
+correct = 0
+total = 0
+results = [None] * BATCH_SIZE
+for i in range(BATCH_SIZE):
+    results[i] = [None] * 3
 
+# print(results)
 for audios, labels in test_ds.take(1):
     # Get the signal FFT
     ffts = audio_to_fft(audios)
@@ -391,19 +197,34 @@ for audios, labels in test_ds.take(1):
     y_pred = model.predict(ffts)
     # Take random samples
     rnd = np.random.randint(0, BATCH_SIZE, SAMPLES_TO_DISPLAY)
+    print(rnd)
     audios = audios.numpy()[rnd, :, :]
     labels = labels.numpy()[rnd]
     y_pred = np.argmax(y_pred, axis=-1)[rnd]
-
+    print(y_pred)
     for index in range(SAMPLES_TO_DISPLAY):
         # For every sample, print the true and predicted label
         # as well as run the voice with the noise
+        results[index][0] = (class_names[labels[index]])
+        results[index][1] = (class_names[y_pred[index]])
+        if labels[index] == y_pred[index]:
+            correct += 1
+            results[index][2] = ("True")
+        else:
+            results[index][2] = ("False")
+        total += 1
+        
         print(
-            "Speaker:\33{} {}\33[0m\tPredicted:\33{} {}\33[0m".format(
-                "[92m" if labels[index] == y_pred[index] else "[91m",
+            "Speaker:\033{} {}\033[0m\tPredicted:\033{} {}\033[0m".format(
+                "[42m" if labels[index] == y_pred[index] else "[41m",
                 class_names[labels[index]],
-                "[92m" if labels[index] == y_pred[index] else "[91m",
+                "[42m" if labels[index] == y_pred[index] else "[41m",
                 class_names[y_pred[index]],
             )
         )
-        display(Audio(audios[index, :, :].squeeze(), rate=SAMPLING_RATE))
+        # display(Audio(audios[index, :, :].squeeze(), rate=SAMPLING_RATE) )
+print(correct/total)
+df = pd.DataFrame(results)
+results_csv_file = 'results13.csv'
+with open(results_csv_file, mode='w') as f:
+    df.to_csv(f)

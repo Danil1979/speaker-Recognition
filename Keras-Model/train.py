@@ -39,20 +39,20 @@ from tensorflow import keras
 import tensorflow_io as tfio
 from pathlib import Path
 from IPython.display import display, Audio
-
+import pandas as pd
 
 
 # Get the data from https://www.kaggle.com/kongaevans/speaker-recognition-dataset/download
 # and save it to the 'Downloads' folder in your HOME directory
 DATASET_ROOT = os.path.join(os.path.expanduser("~"), "Downloads/16000_pcm_speeches")
-DATASET_ROOT_DOWNLOAD = os.path.join(os.path.expanduser("~"), "Downloads")
+
 # The folders in which we will put the audio samples and the noise samples
 AUDIO_SUBFOLDER = "audio"
 NOISE_SUBFOLDER = "noise"
 
 DATASET_AUDIO_PATH = os.path.join(DATASET_ROOT, AUDIO_SUBFOLDER)
 DATASET_NOISE_PATH = os.path.join(DATASET_ROOT, NOISE_SUBFOLDER)
-DATASET_TEST_PATH = os.path.join(DATASET_ROOT_DOWNLOAD, "train")
+
 # Percentage of samples to use for validation
 VALID_SPLIT = 0.1
 
@@ -71,7 +71,7 @@ SAMPLING_RATE = 16000
 #      where prop = sample_amplitude / noise_amplitude
 SCALE = 0.5
 
-BATCH_SIZE = 1
+BATCH_SIZE = 128
 EPOCHS = 100
 
 
@@ -273,27 +273,10 @@ for label, name in enumerate(class_names):
     audio_paths += speaker_sample_paths
     labels += [label] * len(speaker_sample_paths)
 
-
-
-
 print(
     "Found {} files belonging to {} classes.".format(len(audio_paths), len(class_names))
 )
 
-test_folder = os.listdir(DATASET_TEST_PATH)
-test_paths = []
-test_labels = []
-for label, name in enumerate(test_folder):
-    print("Processing speaker for testing {}".format(name,))
-    dir_path = Path(DATASET_TEST_PATH) / name
-    speaker_sample_paths = [
-        os.path.join(dir_path, filepath)
-        for filepath in os.listdir(dir_path)
-        if filepath.endswith(".wav")
-    ]
-    test_paths += speaker_sample_paths
-    test_labels += [label] * len(speaker_sample_paths)
-    print(test_labels)
 # Shuffle
 rng = np.random.RandomState(SHUFFLE_SEED)
 rng.shuffle(audio_paths)
@@ -372,13 +355,48 @@ def build_model(input_shape, num_classes):
 
     return keras.models.Model(inputs=inputs, outputs=outputs)
 
-model = keras.models.load_model('speaker-Recognition/saved_model/my_model')
+
+model = build_model((SAMPLING_RATE // 2, 1), len(class_names))
+
 model.summary()
 
+# Compile the model using Adam's default learning rate
+model.compile(
+    optimizer="Adam", loss="sparse_categorical_crossentropy", metrics=["accuracy"]
+)
 
+# Add callbacks:
+# 'EarlyStopping' to stop training when the model is not enhancing anymore
+# 'ModelCheckPoint' to always keep the model that has the best val_accuracy
+model_save_filename = "speaker-Recognition/model.h5"
+
+earlystopping_cb = keras.callbacks.EarlyStopping(patience=10, restore_best_weights=True)
+mdlcheckpoint_cb = keras.callbacks.ModelCheckpoint(
+    model_save_filename, monitor="val_accuracy", save_best_only=True
+)
+
+"""
+## Training
+"""
+
+history = model.fit(
+    train_ds,
+    epochs=EPOCHS,
+    validation_data=valid_ds,
+    callbacks=[earlystopping_cb, mdlcheckpoint_cb],
+)
+
+#save history as excel file
+hist_df = pd.DataFrame(history.history) 
+hist_csv_file = 'history1.csv'
+with open(hist_csv_file, mode='w') as f:
+    hist_df.to_csv(f)
+"""
+## Evaluation
+"""
 
 print(model.evaluate(valid_ds))
-
+model.save('speaker-Recognition/saved_model/my_model(v4)')
 """
 We get ~ 98% validation accuracy.
 """
@@ -394,7 +412,7 @@ the model is still pretty accurate
 
 SAMPLES_TO_DISPLAY = 10
 
-test_ds = paths_and_labels_to_dataset(test_paths, test_labels)
+test_ds = paths_and_labels_to_dataset(valid_audio_paths, valid_labels)
 test_ds = test_ds.shuffle(buffer_size=BATCH_SIZE * 8, seed=SHUFFLE_SEED).batch(
     BATCH_SIZE
 )
@@ -402,7 +420,6 @@ test_ds = test_ds.shuffle(buffer_size=BATCH_SIZE * 8, seed=SHUFFLE_SEED).batch(
 test_ds = test_ds.map(lambda x, y: (add_noise(x, noises, scale=SCALE), y))
 
 for audios, labels in test_ds.take(1):
-   
     # Get the signal FFT
     ffts = audio_to_fft(audios)
     # Predict
